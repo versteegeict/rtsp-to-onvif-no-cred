@@ -7,22 +7,64 @@ const url = require('url');
 const fs = require('fs');
 const logger = require('simple-node-logger');
 
-const { getIp4FromMac } = require('./net-tools')
+const { getIp4FromMac } = require('./net-tools');
+
+/* ----------------------- Helpers voor auth/RTSP ----------------------- */
+
+function extractCredentialsFromSecurity(security) {
+    // node-soap kan verschillende security objecten doorgeven
+    // Probeer WS-Security én BasicAuth
+    const u1 = security && security.UsernameToken && security.UsernameToken.Username;
+    const p1 = security && security.UsernameToken && security.UsernameToken.Password;
+    const u2 = security && security.BasicAuth && security.BasicAuth.username;
+    const p2 = security && security.BasicAuth && security.BasicAuth.password;
+    return {
+        username: (u1 ?? u2 ?? '') + '',
+        password: (p1 ?? p2 ?? '') + ''
+    };
+}
+
+function buildRtspUri(host, port, path, includeMode, creds) {
+    const p = path.startsWith('/') ? path : `/${path}`;
+    if (includeMode === 'from_onvif' && creds && creds.username) {
+        return `rtsp://${encodeURIComponent(creds.username)}:${encodeURIComponent(creds.password)}@${host}:${port}${p}`;
+    }
+    if (includeMode === 'from_config' && creds && creds.username) {
+        return `rtsp://${encodeURIComponent(creds.username)}:${encodeURIComponent(creds.password)}@${host}:${port}${p}`;
+    }
+    // 'never' of geen bruikbare credentials
+    return `rtsp://${host}:${port}${p}`;
+}
+
+/* --------------------------------------------------------------------- */
 
 Date.prototype.stdTimezoneOffset = function () {
     let jan = new Date(this.getFullYear(), 0, 1);
     let jul = new Date(this.getFullYear(), 6, 1);
     return Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
-}
+};
 
 Date.prototype.isDstObserved = function () {
     return this.getTimezoneOffset() < this.stdTimezoneOffset();
-}
+};
 
 module.exports = class OnvifServer {
     constructor(logger, config) {
         this.config = config;
         this.logger = logger;
+
+        // Per-camera auth/RTSP beleid
+        this.authCfg = {
+            mode: (this.config.auth && this.config.auth.mode) || 'accept_all',   // 'accept_all' | 'require'
+            username: (this.config.auth && this.config.auth.username) || '',
+            password: (this.config.auth && this.config.auth.password) || ''
+        };
+        this.rtspAuthCfg = {
+            include: (this.config.rtsp_auth && this.config.rtsp_auth.include) || 'never', // 'never' | 'from_onvif' | 'from_config'
+            username: (this.config.rtsp_auth && this.config.rtsp_auth.username) || '',
+            password: (this.config.rtsp_auth && this.config.rtsp_auth.password) || ''
+        };
+        this.lastOnvifCreds = { username: '', password: '' }; // gevuld door authenticate-hook
 
         this.config.hostname = getIp4FromMac(logger, this.config.mac);
         if (!this.config.hostname)
@@ -232,7 +274,7 @@ module.exports = class OnvifServer {
                                         MaximumNumberOfProfiles: this.profiles.length
                                     }
                                 }
-                            }
+                            };
                         }
 
                         return response;
@@ -308,14 +350,19 @@ module.exports = class OnvifServer {
                     },
 
                     GetStreamUri: (args) => {
-                        // Kies het juiste pad, maar voeg NOOIT user:pass toe.
+                        // Kies HQ of LQ pad
                         let path = this.config.highQuality.rtsp;
                         if (args.ProfileToken == 'sub_stream' && this.config.lowQuality)
                             path = this.config.lowQuality.rtsp;
 
+                        const includeMode = this.rtspAuthCfg.include; // 'never' | 'from_onvif' | 'from_config'
+                        let credSource = null;
+                        if (includeMode === 'from_onvif')  credSource = this.lastOnvifCreds;
+                        if (includeMode === 'from_config') credSource = { username: this.rtspAuthCfg.username, password: this.rtspAuthCfg.password };
+
                         return {
                             MediaUri: {
-                                Uri: `rtsp://${this.config.hostname}:${this.config.ports.rtsp}${path}`,
+                                Uri: buildRtspUri(this.config.hostname, this.config.ports.rtsp, path, includeMode, credSource),
                                 InvalidAfterConnect: false,
                                 InvalidAfterReboot: false,
                                 Timeout: 'PT30S'
@@ -343,15 +390,11 @@ module.exports = class OnvifServer {
     startHttpServer() {
         this.logger.info(`SERVER: ${this.config.name} - HTTP listening on ${this.config.hostname}:${this.config.ports.server}`);
 
-        // 1) HTTP server: accepteer altijd (ook met Authorization header aanwezig)
+        // HTTP-server (we laten alle requests door; geen 401s)
         this.server = http.createServer(this.listen);
-        this.server.on('request', (req, res) => {
-            // We intercepten niets; geen 401’s. Eventueel debug:
-            // console.debug('Authorization:', req.headers['authorization'] || '(none)');
-        });
         this.server.listen(this.config.ports.server, this.config.hostname);
 
-        // 2) SOAP DeviceService
+        // SOAP DeviceService
         this.deviceService = soap.listen(this.server, {
             path: '/onvif/device_service',
             services: this.onvif,
@@ -359,7 +402,7 @@ module.exports = class OnvifServer {
             forceSoap12Headers: true
         });
 
-        // 3) SOAP MediaService
+        // SOAP MediaService
         this.mediaService = soap.listen(this.server, {
             path: '/onvif/media_service',
             services: this.onvif,
@@ -367,18 +410,25 @@ module.exports = class OnvifServer {
             forceSoap12Headers: true
         });
 
-        // 4) *** BELANGRIJK ***: Alle auth altijd laten slagen (HTTP & WS-Security)
-        const acceptAllAuth = (security, callback) => {
-            // security bevat evt. {UsernameToken, BasicAuth, ...} – we negeren dit.
-            try { callback(true); } catch { /* oudere soap versies */ }
-            return true;
+        // Per-service authenticatie: accept_all of require(user/pass)
+        const makeAuthenticator = (server) => (security, callback) => {
+            const creds = extractCredentialsFromSecurity(security);
+            server.lastOnvifCreds = creds; // onthoud t.b.v. from_onvif
+
+            let ok = true;
+            if (server.authCfg.mode === 'require') {
+                ok = (creds.username === server.authCfg.username && creds.password === server.authCfg.password);
+            }
+            try { callback(ok); } catch (e) { /* oudere soap versies */ }
+            return ok;
         };
+
         if (this.deviceService) {
-            this.deviceService.authenticate = acceptAllAuth;
+            this.deviceService.authenticate = makeAuthenticator(this);
             this.deviceService.authorizeConnection = () => true;
         }
         if (this.mediaService) {
-            this.mediaService.authenticate = acceptAllAuth;
+            this.mediaService.authenticate = makeAuthenticator(this);
             this.mediaService.authorizeConnection = () => true;
         }
     }
