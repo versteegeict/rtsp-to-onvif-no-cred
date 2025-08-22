@@ -308,6 +308,7 @@ module.exports = class OnvifServer {
                     },
 
                     GetStreamUri: (args) => {
+                        // Kies het juiste pad, maar voeg NOOIT user:pass toe.
                         let path = this.config.highQuality.rtsp;
                         if (args.ProfileToken == 'sub_stream' && this.config.lowQuality)
                             path = this.config.lowQuality.rtsp;
@@ -342,42 +343,53 @@ module.exports = class OnvifServer {
     startHttpServer() {
         this.logger.info(`SERVER: ${this.config.name} - HTTP listening on ${this.config.hostname}:${this.config.ports.server}`);
 
+        // 1) HTTP server: accepteer altijd (ook met Authorization header aanwezig)
         this.server = http.createServer(this.listen);
+        this.server.on('request', (req, res) => {
+            // We intercepten niets; geen 401’s. Eventueel debug:
+            // console.debug('Authorization:', req.headers['authorization'] || '(none)');
+        });
         this.server.listen(this.config.ports.server, this.config.hostname);
 
+        // 2) SOAP DeviceService
         this.deviceService = soap.listen(this.server, {
             path: '/onvif/device_service',
             services: this.onvif,
             xml: fs.readFileSync('./wsdl/device_service.wsdl', 'utf8'),
             forceSoap12Headers: true
         });
-       
 
+        // 3) SOAP MediaService
         this.mediaService = soap.listen(this.server, {
             path: '/onvif/media_service',
             services: this.onvif,
             xml: fs.readFileSync('./wsdl/media_service.wsdl', 'utf8'),
             forceSoap12Headers: true
         });
-        
+
+        // 4) *** BELANGRIJK ***: Alle auth altijd laten slagen (HTTP & WS-Security)
+        const acceptAllAuth = (security, callback) => {
+            // security bevat evt. {UsernameToken, BasicAuth, ...} – we negeren dit.
+            try { callback(true); } catch { /* oudere soap versies */ }
+            return true;
+        };
+        if (this.deviceService) {
+            this.deviceService.authenticate = acceptAllAuth;
+            this.deviceService.authorizeConnection = () => true;
+        }
+        if (this.mediaService) {
+            this.mediaService.authenticate = acceptAllAuth;
+            this.mediaService.authorizeConnection = () => true;
+        }
     }
 
     enableDebugOutput() {
         this.deviceService.log = function(type, data, req){
             console.debug(`SERVER: ${data}`);
-            //there is no logger in this context
         };
         this.mediaService.log = function(type, data, req){
             console.debug(`SERVER: ${data}`);
-            //there is no logger in this context
         };
-        // this.deviceService.on('request', (request, methodName) => {
-        //     this.logger.debug(`SERVER: ${this.config.name} - DeviceService: ${methodName}`);
-        // });
-
-        // this.mediaService.on('request', (request, methodName) => {
-        //     this.logger.debug(`SERVER: ${this.config.name} -  MediaService: ${methodName}`);
-        // });
     }
 
     startDiscovery() {
