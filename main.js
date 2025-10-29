@@ -20,8 +20,8 @@ if (args) {
     }
 
     if (!args.config) {
-        logger.info('Please specifiy a config filename!');
-        return -1;
+        logger.info('Please specify a config filename!');
+        process.exit(1);
     }
 
     let config = readAndCheckConfig(logger, args.config)
@@ -57,7 +57,7 @@ if (args) {
             }
         } else {
             logger.error(`Failed to find IP address for MAC address ${onvifConfig.mac}`)
-            return -1;
+            process.exit(1);
         }
     }
 
@@ -65,6 +65,4 @@ if (args) {
         logger.info(`PROXY: ${proxy.listenAddress}:${proxy.listenPort} --> ${proxy.targetAddress}:${proxy.targetPort}`);
         tcpProxy.createProxy(proxy.listenPort, proxy.targetAddress, proxy.targetPort, { hostname: proxy.listenAddress });
     }
-
-    return 0;
 }

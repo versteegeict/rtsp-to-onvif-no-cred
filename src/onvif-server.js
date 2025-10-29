@@ -5,7 +5,6 @@ const xml2js = require('xml2js');
 const uuid = require('node-uuid');
 const url = require('url');
 const fs = require('fs');
-const logger = require('simple-node-logger');
 
 const { getIp4FromMac } = require('./net-tools');
 
@@ -38,15 +37,15 @@ function buildRtspUri(host, port, path, includeMode, creds) {
 
 /* --------------------------------------------------------------------- */
 
-Date.prototype.stdTimezoneOffset = function () {
-    let jan = new Date(this.getFullYear(), 0, 1);
-    let jul = new Date(this.getFullYear(), 6, 1);
+function getStdTimezoneOffset(date) {
+    let jan = new Date(date.getFullYear(), 0, 1);
+    let jul = new Date(date.getFullYear(), 6, 1);
     return Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
-};
+}
 
-Date.prototype.isDstObserved = function () {
-    return this.getTimezoneOffset() < this.stdTimezoneOffset();
-};
+function isDstObserved(date) {
+    return date.getTimezoneOffset() < getStdTimezoneOffset(date);
+}
 
 module.exports = class OnvifServer {
     constructor(logger, config) {
@@ -67,8 +66,17 @@ module.exports = class OnvifServer {
         this.lastOnvifCreds = { username: '', password: '' }; // gevuld door authenticate-hook
 
         this.config.hostname = getIp4FromMac(logger, this.config.mac);
-        if (!this.config.hostname)
-            return -1;
+        if (!this.config.hostname) {
+            throw new Error(`Failed to find IP address for MAC address ${this.config.mac}`);
+        }
+
+        // Cache snapshot image at startup
+        try {
+            this.cachedSnapshot = fs.readFileSync('./resources/snapshot.png');
+        } catch (error) {
+            this.logger.warn('Could not load snapshot.png, snapshot endpoint will not work');
+            this.cachedSnapshot = null;
+        }
 
         this.videoSource = {
             attributes: {
@@ -133,7 +141,7 @@ module.exports = class OnvifServer {
                             token: 'video_src_config_token'
                         },
                         SourceToken: 'video_src_token',
-                        Bounds: { attributes: { x: 0, y: 0, width: this.config.highQuality.width, height: this.config.highQuality.height } }
+                        Bounds: { attributes: { x: 0, y: 0, width: this.config.lowQuality.width, height: this.config.lowQuality.height } }
                     },
                     VideoEncoderConfiguration: {
                         attributes: {
@@ -172,12 +180,14 @@ module.exports = class OnvifServer {
                         let abs_offset = Math.abs(offset);
                         let hrs_offset = Math.floor(abs_offset / 60);
                         let mins_offset = (abs_offset % 60);
-                        let tz = 'UTC' + (offset < 0 ? '-' : '+') + hrs_offset + (mins_offset === 0 ? '' : ':' + mins_offset);
+                        // getTimezoneOffset() returns negative for timezones east of UTC
+                        // So offset < 0 means UTC+X (e.g., -60 = UTC+1)
+                        let tz = 'UTC' + (offset > 0 ? '-' : '+') + hrs_offset + (mins_offset === 0 ? '' : ':' + mins_offset);
 
                         return {
                             SystemDateAndTime: {
                                 DateTimeType: 'NTP',
-                                DaylightSavings: now.isDstObserved(),
+                                DaylightSavings: isDstObserved(now),
                                 TimeZone: {
                                     TZ: tz
                                 },
@@ -377,9 +387,14 @@ module.exports = class OnvifServer {
     listen(request, response) {
         let action = url.parse(request.url, true).pathname;
         if (action == '/snapshot.png') {
-            let image = fs.readFileSync('./resources/snapshot.png');
-            response.writeHead(200, { 'Content-Type': 'image/png' });
-            response.end(image, 'binary');
+            if (this.cachedSnapshot) {
+                response.writeHead(200, { 'Content-Type': 'image/png' });
+                response.end(this.cachedSnapshot, 'binary');
+            } else {
+                response.writeHead(404, { 'Content-Type': 'text/plain' });
+                response.write('404 Snapshot Not Available\n');
+                response.end();
+            }
         } else {
             response.writeHead(404, { 'Content-Type': 'text/plain' });
             response.write('404 Not Found\n');
@@ -496,7 +511,10 @@ module.exports = class OnvifServer {
 
                     this.discoveryMessageNo++;
                     let responseBuffer = Buffer.from(response);
-                    return dgram.createSocket('udp4').send(responseBuffer, 0, responseBuffer.length, remote.port, remote.address);
+                    const responseSocket = dgram.createSocket('udp4');
+                    responseSocket.send(responseBuffer, 0, responseBuffer.length, remote.port, remote.address, (err) => {
+                        responseSocket.close();
+                    });
                 }
             });
         });

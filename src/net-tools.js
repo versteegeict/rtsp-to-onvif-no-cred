@@ -1,4 +1,5 @@
 const os = require('os');
+const uuid = require('node-uuid');
 
 
 function getIp4FromMac(logger, macAddress) {
@@ -20,17 +21,13 @@ function getIp4FromMac(logger, macAddress) {
 
 // Generate a UUIDv4
 function generateUUIDv4() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    })
+    return uuid.v4();
 }
 
 //Prefix - Unicast LAA
 function generateNetworkMac() {
     return "1A:11:B0:XX:XX:XX".replace(/X/g, function () {
-        return "13579BDF".charAt(Math.floor(Math.random() * 8));
+        return "0123456789ABCDEF".charAt(Math.floor(Math.random() * 16));
     })
 }
 

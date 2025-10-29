@@ -1,6 +1,6 @@
 const YAML = require('yaml');
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 
 const { getIp4FromMac, generateUUIDv4, generateNetworkMac } = require('./net-tools')
 
@@ -13,7 +13,7 @@ function readConfig(logger, configFile) {
     } catch (error) {
         if (error.code === 'ENOENT') {
             logger.info(`File not found: ${configFile}`);
-            exit(-1);
+            process.exit(1);
         }
         throw error;
     }
@@ -23,15 +23,14 @@ function readConfig(logger, configFile) {
         config = YAML.parse(configData);
     } catch (error) {
         logger.info('Failed to read config, invalid yaml syntax.')
-        exit(-1);
+        process.exit(1);
     }
 
     return config;
 }
 
 function sleep(seconds){
-    const spawnSync = require('child_process').spawnSync;
-    var sleep = spawnSync('sleep', [seconds]);
+    spawnSync('sleep', [seconds]);
 }
 
 function readAndCheckConfig(logger, configFile) {
