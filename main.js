@@ -26,7 +26,7 @@ if (args) {
 
     let config = readAndCheckConfig(logger, args.config)
 
-    let proxies = {};
+    let proxies = [];
     for (let onvifConfig of config.onvif) {
 
         let server = new OnvifServer(logger, onvifConfig);
@@ -39,24 +39,31 @@ if (args) {
             if (process.env.DEBUG)
                 server.enableDebugOutput()
 
-            if (!proxies[onvifConfig.target.hostname])
-                proxies[onvifConfig.target.hostname] = {}
-
-            if (onvifConfig.ports.rtsp && onvifConfig.target.ports.rtsp)
-                proxies[onvifConfig.target.hostname][onvifConfig.ports.rtsp] = onvifConfig.target.ports.rtsp;
-            if (onvifConfig.ports.snapshot && onvifConfig.target.ports.snapshot)
-                proxies[onvifConfig.target.hostname][onvifConfig.ports.snapshot] = onvifConfig.target.ports.snapshot;
+            if (onvifConfig.ports.rtsp && onvifConfig.target.ports.rtsp) {
+                proxies.push({
+                    listenAddress: server.getHostname(),
+                    listenPort: onvifConfig.ports.rtsp,
+                    targetAddress: onvifConfig.target.hostname,
+                    targetPort: onvifConfig.target.ports.rtsp
+                });
+            }
+            if (onvifConfig.ports.snapshot && onvifConfig.target.ports.snapshot) {
+                proxies.push({
+                    listenAddress: server.getHostname(),
+                    listenPort: onvifConfig.ports.snapshot,
+                    targetAddress: onvifConfig.target.hostname,
+                    targetPort: onvifConfig.target.ports.snapshot
+                });
+            }
         } else {
             logger.error(`Failed to find IP address for MAC address ${onvifConfig.mac}`)
             return -1;
         }
     }
 
-    for (let destinationAddress in proxies) {
-        for (let sourcePort in proxies[destinationAddress]) {
-            logger.info(`PROXY: ${sourcePort} --> ${destinationAddress}:${proxies[destinationAddress][sourcePort]}`);
-            tcpProxy.createProxy(sourcePort, destinationAddress, proxies[destinationAddress][sourcePort]);
-        }
+    for (let proxy of proxies) {
+        logger.info(`PROXY: ${proxy.listenAddress}:${proxy.listenPort} --> ${proxy.targetAddress}:${proxy.targetPort}`);
+        tcpProxy.createProxy(proxy.listenPort, proxy.targetAddress, proxy.targetPort, { hostname: proxy.listenAddress });
     }
 
     return 0;
